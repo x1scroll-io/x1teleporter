@@ -28,7 +28,7 @@ const DEMO_MODE = true;
 const ENABLE_TRON = false;
 
 const CHAINS = {
-  x1:    { id: "x1",    name: "X1",          lifiKey: null,  chainId: null,  walletType: "solana", color: "#00E0C6", glyph: "✕" },
+  x1:    { id: "x1",    name: "X1",          lifiKey: null,  chainId: null,  walletType: "solana", color: "#5B9DFF", glyph: "X1" },
   eth:   { id: "eth",   name: "Ethereum",    lifiKey: "eth", chainId: 1,     walletType: "evm",    color: "#627EEA", glyph: "Ξ" },
   bsc:   { id: "bsc",   name: "BNB Chain",   lifiKey: "bsc", chainId: 56,    walletType: "evm",    color: "#F0B90B", glyph: "B" },
   sol:   { id: "sol",   name: "Solana",      lifiKey: "SOL", chainId: "SOL", walletType: "solana", color: "#9945FF", glyph: "◎" },
@@ -107,6 +107,28 @@ const INTEGRATOR_FEE = 0.01;     // 1% — LiFi max is 10% (0.10)
 // Proxy base — Vercel serves /api/* as serverless functions on the same origin.
 const API_BASE = "";
 
+// ── Warp Bridge (Solana ↔ X1) — VERIFIED from live mainnet tx ──
+// Program 6JbPTuxVuoTgyQeXFb9MH8C8nUY8NBbLP1Lu4B13JfMD, instruction BridgeOut.
+// The bridge charges a FLAT 1 USDC fee (hardcoded, not %), and rejects bridges
+// under $10. We skim our 1% BEFORE the bridge, so the post-skim amount must
+// still clear Warp's $10 floor. Hence a $25 minimum into X1 (after 1% = $24.75,
+// safely above $10 even if the LiFi leg lands a little short).
+const WARP_FLAT_FEE = 1;     // USDC, charged by the Warp bridge itself
+const WARP_MIN = 10;         // Warp rejects bridges below this (USDC)
+const X1_MIN = 25;           // our enforced minimum into X1 (UX + safety buffer)
+// WARP_LIVE gates the REAL Solana→X1 Warp execution (warpBridge.js).
+// false (default) = stage 2 stays in safe demo animation; the real bridge code
+// is NOT fired. Flip to true ONLY after runStage2({allowLive:false}) simulates
+// clean against mainnet and you've confirmed the PDAs + seq. See STAGE2_README.
+const WARP_LIVE = false;
+// SECOND gate: even with WARP_LIVE true, this must ALSO be true to actually
+// broadcast. WARP_LIVE alone = build + simulate (no send). Both = real send.
+const WARP_LIVE_SEND = false;
+// Solana RPC for the Warp leg. Use your own RPC for reliability in production.
+const SOLANA_RPC = "https://api.mainnet-beta.solana.com";
+// Your SVM fee wallet — where the 1% skim lands. Set before going live.
+const FEE_WALLET_SVM = "11111111111111111111111111111111"; // <<< replace
+
 function calcFee(amountUsd) {
   const n = parseFloat(amountUsd);
   if (isNaN(n) || n <= 0) return 0;
@@ -138,134 +160,224 @@ function tokensFor(chain) {
 
 // Styles (defined before components that reference S)
 const S = {
-  root: { position: "relative", minHeight: "100vh", background: "#05070d", color: "#e8edf6",
+  root: { position: "relative", minHeight: "100vh", background: "#05070d", color: "#e8edf6", textShadow: "0 1px 6px rgba(0,0,0,0.7)",
     fontFamily: "'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif", overflow: "hidden" },
   shell: { position: "relative", zIndex: 1, maxWidth: 620, margin: "0 auto", padding: "32px 20px 48px" },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 22 },
   brand: { display: "flex", alignItems: "center", gap: 12 },
   brandMark: { width: 38, height: 38, borderRadius: 11, display: "grid", placeItems: "center",
-    background: "linear-gradient(135deg,#00E0C6,#9945FF)", color: "#05070d", fontWeight: 800, fontSize: 20 },
+    background: "linear-gradient(135deg,#2775E8,#5B9DFF)", color: "#ffffff", fontWeight: 800, fontSize: 15 },
   brandName: { fontWeight: 800, letterSpacing: 3, fontSize: 16 },
   brandSub: { fontSize: 11, color: "#7d8aa0", letterSpacing: 0.3 },
   walletBar: { display: "flex", gap: 8 },
   walletPill: { display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 999,
-    background: "rgba(13,18,28,0.7)", border: "1px solid #28303f", color: "#e8edf6", cursor: "pointer",
-    backdropFilter: "blur(8px)" },
+    background: "rgba(13,18,28,0.7)", border: "1px solid #28303f", color: "#e8edf6", cursor: "pointer" },
   dot: { width: 8, height: 8, borderRadius: 999 },
   routeBadge: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 600,
     color: "#9aa6bb", padding: "6px 12px", borderRadius: 999, background: "rgba(13,18,28,0.6)",
     border: "1px solid #1d2433", marginBottom: 14 },
   routeDot: { width: 7, height: 7, borderRadius: 999 },
-  twoStage: { marginLeft: 6, fontSize: 10, color: "#00E0C6", border: "1px solid #16413c",
-    background: "rgba(0,224,198,0.08)", padding: "2px 7px", borderRadius: 999 },
-  card: { background: "rgba(10,14,22,0.82)", border: "1px solid #1a2130", borderRadius: 20, padding: 22,
-    backdropFilter: "blur(14px)", boxShadow: "0 24px 80px rgba(0,0,0,0.5)" },
+  twoStage: { marginLeft: 6, fontSize: 10, color: "#2775E8", border: "1px solid #1a3a6b",
+    background: "rgba(39,117,232,0.08)", padding: "2px 7px", borderRadius: 999 },
+  card: { background: "transparent", border: "1px solid rgba(39,117,232,0.25)", borderRadius: 20, padding: 22, boxShadow: "0 24px 80px rgba(0,0,0,0.5)" },
   fieldLabel: { fontSize: 11, color: "#7d8aa0", marginBottom: 6, fontWeight: 600, letterSpacing: 0.3 },
   selectWrap: { position: "relative" },
-  select: { width: "100%", appearance: "none", background: "#0c1119", color: "#e8edf6",
+  select: { width: "100%", appearance: "none", background: "transparent", color: "#e8edf6",
     border: "1px solid #232c3c", borderRadius: 12, padding: "12px 14px", fontSize: 14, fontWeight: 600, cursor: "pointer" },
-  amountInput: { width: "100%", boxSizing: "border-box", background: "#0c1119", color: "#e8edf6",
+  amountInput: { width: "100%", boxSizing: "border-box", background: "transparent", color: "#e8edf6",
     border: "1px solid #232c3c", borderRadius: 12, padding: "12px 14px", fontSize: 18, fontWeight: 700, outline: "none" },
-  swapBtn: { width: 42, height: 42, borderRadius: 12, background: "#0c1119", border: "1px solid #232c3c",
-    color: "#00E0C6", fontSize: 18, cursor: "pointer", marginBottom: 1 },
+  swapBtn: { width: 42, height: 42, borderRadius: 12, background: "transparent", border: "1px solid #232c3c",
+    color: "#2775E8", fontSize: 18, cursor: "pointer", marginBottom: 1 },
   vizWrap: { marginTop: 22, marginBottom: 4, padding: "8px 4px" },
-  quoteBox: { marginTop: 10, background: "#0a0f18", border: "1px solid #1a2130", borderRadius: 14, padding: "12px 14px" },
-  maxBtn: { background: "rgba(0,224,198,0.1)", border: "1px solid #16413c", color: "#00E0C6",
+  quoteBox: { marginTop: 10, background: "transparent", border: "1px solid #1a2130", borderRadius: 14, padding: "12px 14px" },
+  maxBtn: { background: "rgba(39,117,232,0.1)", border: "1px solid #1a3a6b", color: "#2775E8",
     borderRadius: 6, padding: "1px 6px", fontSize: 10, fontWeight: 700, cursor: "pointer" },
-  detailBox: { marginTop: 10, background: "#0a0f18", border: "1px solid #1a2130", borderRadius: 14, padding: "12px 14px" },
+  detailBox: { marginTop: 10, background: "transparent", border: "1px solid #1a2130", borderRadius: 14, padding: "12px 14px" },
   detailHead: { fontSize: 11, color: "#7d8aa0", marginBottom: 8, fontWeight: 600, letterSpacing: 0.3 },
-  toolChip: { fontSize: 12, color: "#e8edf6", background: "#0c1119", border: "1px solid #1d2433",
+  toolChip: { fontSize: 12, color: "#e8edf6", background: "transparent", border: "1px solid #1d2433",
     padding: "4px 9px", borderRadius: 8, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 5 },
-  statusBox: { marginTop: 10, display: "flex", alignItems: "center", gap: 10, background: "#0a0f18",
+  statusBox: { marginTop: 10, display: "flex", alignItems: "center", gap: 10, background: "transparent",
     border: "1px solid #1a2130", borderRadius: 14, padding: "12px 14px" },
   statusDot: { width: 10, height: 10, borderRadius: 999, flexShrink: 0 },
   recoverBanner: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12,
-    background: "rgba(0,224,198,0.06)", border: "1px solid #16413c", borderRadius: 14, padding: "12px 14px", marginBottom: 14 },
-  recoverBtn: { background: "linear-gradient(90deg,#00E0C6,#16b8a3)", color: "#05070d", border: "none",
+    background: "rgba(39,117,232,0.06)", border: "1px solid #1a3a6b", borderRadius: 14, padding: "12px 14px", marginBottom: 14 },
+  recoverBtn: { background: "linear-gradient(90deg,#2775E8,#1B5FCC)", color: "#05070d", border: "none",
     borderRadius: 9, padding: "8px 14px", fontSize: 12, fontWeight: 800, cursor: "pointer" },
   recoverDismiss: { background: "transparent", color: "#7d8aa0", border: "1px solid #28303f",
     borderRadius: 9, padding: "8px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
-  historyPanel: { marginTop: 14, background: "rgba(10,14,22,0.82)", border: "1px solid #1a2130",
-    borderRadius: 20, padding: 18, backdropFilter: "blur(14px)" },
-  settingsPanel: { background: "rgba(10,14,22,0.82)", border: "1px solid #1a2130",
-    borderRadius: 20, padding: 18, backdropFilter: "blur(14px)", marginBottom: 14 },
-  slipBtn: { background: "#0c1119", border: "1px solid #232c3c", color: "#9aa6bb",
+  historyPanel: { marginTop: 14, background: "transparent", border: "1px solid #1a2130",
+    borderRadius: 20, padding: 18 },
+  settingsPanel: { background: "transparent", border: "1px solid #1a2130",
+    borderRadius: 20, padding: 18, marginBottom: 14 },
+  slipBtn: { background: "transparent", border: "1px solid #232c3c", color: "#9aa6bb",
     borderRadius: 10, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" },
-  slipBtnActive: { background: "rgba(0,224,198,0.1)", borderColor: "#00E0C6", color: "#00E0C6" },
-  slipInput: { width: 70, background: "#0c1119", border: "1px solid #232c3c", color: "#e8edf6",
+  slipBtnActive: { background: "rgba(39,117,232,0.1)", borderColor: "#2775E8", color: "#2775E8" },
+  slipInput: { width: 70, background: "transparent", border: "1px solid #232c3c", color: "#e8edf6",
     borderRadius: 10, padding: "8px 10px", fontSize: 13, fontWeight: 700, outline: "none", textAlign: "center" },
   histRow: { display: "flex", justifyContent: "space-between", alignItems: "center",
     padding: "10px 0", borderTop: "1px solid #141a26" },
   histStatus: { fontSize: 11, fontWeight: 700, border: "1px solid", borderRadius: 999, padding: "3px 9px", flexShrink: 0 },
   stepStrip: { display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" },
-  stepChip: { fontSize: 11, color: "#9aa6bb", background: "#0c1119", border: "1px solid #1d2433",
+  stepChip: { fontSize: 11, color: "#9aa6bb", background: "transparent", border: "1px solid #1d2433",
     padding: "4px 9px", borderRadius: 999, fontWeight: 600 },
   cta: { width: "100%", padding: "15px", borderRadius: 14, border: "1px solid transparent",
-    background: "linear-gradient(90deg,#00E0C6,#16b8a3)", color: "#05070d", fontSize: 15, fontWeight: 800,
+    background: "linear-gradient(90deg,#2775E8,#1B5FCC)", color: "#05070d", fontSize: 15, fontWeight: 800,
     cursor: "pointer", letterSpacing: 0.3 },
-  helper: { marginTop: 12, fontSize: 12, lineHeight: 1.5, color: "#9aa6bb", background: "rgba(0,224,198,0.05)",
-    border: "1px solid #16413c", borderRadius: 12, padding: "10px 12px" },
+  helper: { marginTop: 12, fontSize: 12, lineHeight: 1.5, color: "#9aa6bb", background: "rgba(39,117,232,0.05)",
+    border: "1px solid #1a3a6b", borderRadius: 12, padding: "10px 12px" },
   foot: { textAlign: "center", fontSize: 11, color: "#475065", marginTop: 18, lineHeight: 1.5 },
   toast: { position: "fixed", bottom: 22, left: "50%", transform: "translateX(-50%)", zIndex: 10,
     background: "rgba(13,18,28,0.95)", border: "1px solid #28303f", borderRadius: 12, padding: "12px 18px",
-    fontSize: 13, fontWeight: 600, backdropFilter: "blur(10px)", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" },
+    fontSize: 13, fontWeight: 600, boxShadow: "0 12px 40px rgba(0,0,0,0.5)" },
 };
 
-function NebulaBackground() {
+function PortalBackground() {
   const ref = useRef(null);
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     let raf, w, h, t = 0;
-    const prefersReduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
 
     const stars = [];
+    function spawnStar(cx, cy, maxR) {
+      // start near center with a random angle; warp outward
+      const angle = Math.random() * Math.PI * 2;
+      const dist = Math.random() * maxR * 0.15 + 4; // begin close to core
+      return {
+        angle,
+        dist,
+        speed: Math.random() * 0.6 + 0.4, // base radial speed factor
+        len: 0,
+        bright: Math.random() * 0.5 + 0.5,
+      };
+    }
     function resize() {
       w = canvas.width = canvas.offsetWidth * devicePixelRatio;
       h = canvas.height = canvas.offsetHeight * devicePixelRatio;
       stars.length = 0;
-      const count = Math.min(140, Math.floor((w * h) / 26000));
+      const cx = w * 0.5, cy = h * 0.42;
+      const maxR = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy));
+      const count = Math.min(507, Math.floor((w * h) / 7179));
       for (let i = 0; i < count; i++) {
-        stars.push({
-          x: Math.random() * w,
-          y: Math.random() * h,
-          r: Math.random() * 1.6 * devicePixelRatio + 0.3,
-          vx: (Math.random() - 0.5) * 0.12,
-          vy: (Math.random() - 0.5) * 0.12,
-          tw: Math.random() * Math.PI * 2,
-        });
+        const s = spawnStar(cx, cy, maxR);
+        s.dist = Math.random() * maxR; // scatter initial positions so it's full immediately
+        stars.push(s);
       }
     }
     resize();
     window.addEventListener("resize", resize);
 
-    function draw() {
-      t += 0.005;
-      ctx.clearRect(0, 0, w, h);
-      // two drifting nebula glows
-      const blobs = [
-        { x: w * (0.3 + 0.08 * Math.sin(t)),      y: h * (0.35 + 0.06 * Math.cos(t * 0.8)), c: "0,224,198", r: Math.max(w, h) * 0.45 },
-        { x: w * (0.72 + 0.07 * Math.cos(t * 0.6)), y: h * (0.6 + 0.05 * Math.sin(t)),       c: "153,69,255", r: Math.max(w, h) * 0.4 },
-      ];
-      for (const b of blobs) {
-        const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
-        g.addColorStop(0, `rgba(${b.c},0.10)`);
-        g.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = g;
-        ctx.fillRect(0, 0, w, h);
-      }
-      // stars
-      for (const s of stars) {
-        if (!prefersReduced) { s.x += s.vx; s.y += s.vy; s.tw += 0.03; }
-        if (s.x < 0) s.x = w; if (s.x > w) s.x = 0;
-        if (s.y < 0) s.y = h; if (s.y > h) s.y = 0;
-        const a = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(s.tw));
+    // draw a ring of dashed/segmented arcs at a given radius, rotated by `rot`
+    function ringSegments(cx, cy, radius, rot, segs, gap, lineW, color, alpha) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(rot);
+      ctx.lineWidth = lineW * devicePixelRatio;
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = alpha;
+      const step = (Math.PI * 2) / segs;
+      for (let i = 0; i < segs; i++) {
+        const a0 = i * step;
+        const a1 = a0 + step * (1 - gap);
         ctx.beginPath();
-        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(210,230,255,${a})`;
-        ctx.fill();
+        ctx.arc(0, 0, radius, a0, a1);
+        ctx.stroke();
       }
+      ctx.restore();
+    }
+
+    function draw() {
+      t += reduced ? 0 : 0.0025;
+      ctx.clearRect(0, 0, w, h);
+
+      // deep radial backdrop
+      const cx = w * 0.5, cy = h * 0.42;
+      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(w, h) * 0.7);
+      bg.addColorStop(0, "rgba(10,18,34,0.9)");
+      bg.addColorStop(1, "rgba(3,5,10,1)");
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, w, h);
+
+      // WARP-SPEED STARS — streak radially outward from the core, accelerating
+      const maxR = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy));
+      ctx.lineCap = "round";
+      for (const s of stars) {
+        const prevDist = s.dist;
+        if (!reduced) {
+          // acceleration: speed scales with distance (faster as it nears edge)
+          s.dist += (s.speed * (1.2 + (s.dist / maxR) * 7)) * devicePixelRatio;
+        }
+        // respawn when it flies off the edge
+        if (s.dist > maxR) {
+          const ns = spawnStar(cx, cy, maxR);
+          Object.assign(s, ns);
+          continue;
+        }
+        const cos = Math.cos(s.angle), sin = Math.sin(s.angle);
+        const x1 = cx + cos * prevDist, y1 = cy + sin * prevDist;
+        const x2 = cx + cos * s.dist,   y2 = cy + sin * s.dist;
+        // streak gets longer + brighter + thicker as it moves out
+        const f = s.dist / maxR;
+        const alpha = Math.min(1, 0.15 + f * 0.95) * s.bright;
+        ctx.strokeStyle = `rgba(200,222,255,${alpha})`;
+        ctx.lineWidth = (0.4 + f * 1.8) * devicePixelRatio;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+
+      // the portal: concentric glowing rings, counter-rotating HUD segments
+      const base = Math.min(w, h) * 0.34;
+      const teal = "rgba(39,117,232,1)";
+      const tealDim = "rgba(39,117,232,1)";
+
+      // inner glow disc
+      const glow = ctx.createRadialGradient(cx, cy, base * 0.2, cx, cy, base * 1.15);
+      glow.addColorStop(0, "rgba(39,117,232,0.06)");
+      glow.addColorStop(0.7, "rgba(39,117,232,0.12)");
+      glow.addColorStop(1, "rgba(39,117,232,0)");
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(cx, cy, base * 1.15, 0, Math.PI * 2);
+      ctx.fill();
+
+      // solid thin core ring
+      ctx.save();
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = 1.5 * devicePixelRatio;
+      ctx.strokeStyle = teal;
+      ctx.beginPath();
+      ctx.arc(cx, cy, base * 0.62, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      // rotating segmented rings at several radii (HUD look)
+      ringSegments(cx, cy, base * 0.78,  t * 1.0,  18, 0.45, 2.5, tealDim, 0.55);
+      ringSegments(cx, cy, base * 0.90, -t * 0.7,  6,  0.25, 6,   tealDim, 0.30);
+      ringSegments(cx, cy, base * 1.00,  t * 0.5,  40, 0.6,  1.5, tealDim, 0.40);
+      ringSegments(cx, cy, base * 1.12, -t * 0.35, 12, 0.55, 3,   tealDim, 0.25);
+
+      // a few bright "tick" blocks on the outer ring
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(t * 0.5);
+      ctx.fillStyle = teal;
+      ctx.globalAlpha = 0.7;
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        const rr = base * 1.05;
+        const bx = Math.cos(a) * rr, by = Math.sin(a) * rr;
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.rotate(a);
+        ctx.fillRect(-1.5 * devicePixelRatio, -5 * devicePixelRatio, 3 * devicePixelRatio, 10 * devicePixelRatio);
+        ctx.restore();
+      }
+      ctx.restore();
+
       raf = requestAnimationFrame(draw);
     }
     draw();
@@ -357,8 +469,8 @@ function ChainSelect({ label, value, onChange, exclude }) {
 function WalletPill({ role, type, connected, addr, onClick, busy }) {
   const label = type === "evm" ? "MetaMask" : type === "solana" ? "Phantom" : "Wallet";
   return (
-    <button onClick={onClick} disabled={busy} style={{ ...S.walletPill, borderColor: connected ? "#00E0C6" : "#28303f", opacity: busy ? 0.6 : 1 }}>
-      <span style={{ ...S.dot, background: connected ? "#00E0C6" : "#475065" }} />
+    <button onClick={onClick} disabled={busy} style={{ ...S.walletPill, borderColor: connected ? "#2775E8" : "#28303f", opacity: busy ? 0.6 : 1 }}>
+      <span style={{ ...S.dot, background: connected ? "#2775E8" : "#475065" }} />
       <span style={{ fontSize: 11, color: "#7d8aa0" }}>{role}</span>
       <span style={{ fontSize: 13, fontWeight: 600 }}>
         {busy ? "Connecting…" : connected ? `${addr.slice(0, 4)}…${addr.slice(-4)}` : `Connect ${label}`}
@@ -723,16 +835,29 @@ export default function Teleporter() {
   const getQuote = useCallback(async () => {
     if (!amount || parseFloat(amount) <= 0) return flash("Enter an amount", "err");
     if (from === to) return flash("Source and destination must differ", "err");
-    setPhase("quoting");
 
     const amt = parseFloat(amount);
 
-    // sol_x1 has no LiFi leg — Warp only. (Fee model TBD on the Warp side.)
+    // Routes that END in a Warp hop into X1 (x1 on-ramp + pure sol_x1) must clear
+    // the bridge's $10 floor AFTER our 1% skim. We enforce a $25 minimum.
+    const endsInX1 = routeType === "x1" || routeType === "sol_x1";
+    if (endsInX1 && amt < X1_MIN) {
+      return flash(`Bridge $${X1_MIN}+ into X1 to get started`, "err");
+    }
+
+    setPhase("quoting");
+
+    // sol_x1 — pure Warp bridge, no LiFi leg. Fee stack: our 1% skim (before the
+    // bridge) + Warp's flat $1. We skim, then bridge the remainder.
     if (routeType === "sol_x1") {
       await new Promise((r) => setTimeout(r, 400));
+      const ourFee = amt * INTEGRATOR_FEE;          // our 1%, skimmed first
+      const afterSkim = amt - ourFee;               // amount that reaches Warp
+      const net = Math.max(0, afterSkim - WARP_FLAT_FEE); // Warp takes flat $1
       setQuote({
-        amount: amt, feeUsd: 0, net: amt, recvToken: "USDC.x", recvChain: "X1",
-        note: "Direct Warp bridge — no LiFi leg",
+        amount: amt, feeUsd: ourFee, bridgeFee: WARP_FLAT_FEE, net,
+        recvToken: "USDC.x", recvChain: "X1",
+        note: "Solana → X1 via Warp Bridge",
         steps: hops.map((h) => ({ name: h.name, tool: "Warp Bridge" })),
       });
       setPhase("quoted");
@@ -743,11 +868,13 @@ export default function Teleporter() {
     if (DEMO_MODE) {
       await new Promise((r) => setTimeout(r, 650));
       const feeUsd = amt * INTEGRATOR_FEE;
-      const net = Math.max(0, amt - feeUsd);
+      // x1 on-ramp ends in a Warp hop, so it also eats Warp's flat $1.
+      const bridgeFee = routeType === "x1" ? WARP_FLAT_FEE : 0;
+      const net = Math.max(0, amt - feeUsd - bridgeFee);
       const recvToken = routeType === "x1" ? "USDC.x" : toToken;
       const recvChain = routeType === "x1" ? "X1" : CHAINS[to].name;
       setQuote({
-        amount: amt, feeUsd, net, recvToken, recvChain, demo: true,
+        amount: amt, feeUsd, bridgeFee, net, recvToken, recvChain, demo: true,
         steps: hops.map((h, i) => ({
           name: h.name,
           tool: h.name === "X1" ? "Warp Bridge" : (routeType === "sol_x1" ? "Warp Bridge" : "LiFi"),
@@ -773,11 +900,13 @@ export default function Teleporter() {
       const out = parseFloat(data.estimate.toAmount) / 10 ** outDecimals;
       // The fee LiFi took, surfaced for display (from feeCosts if present).
       const feeUsd = amt * INTEGRATOR_FEE;
+      // x1 on-ramp ends in a Warp hop -> also subtract the flat $1 bridge fee.
+      const bridgeFee = routeType === "x1" ? WARP_FLAT_FEE : 0;
       const recvToken = routeType === "x1" ? "USDC.x" : toToken;
       const recvChain = routeType === "x1" ? "X1" : CHAINS[to].name;
 
       setQuote({
-        amount: amt, feeUsd, net: out, recvToken, recvChain, lifiData: data,
+        amount: amt, feeUsd, bridgeFee, net: Math.max(0, out - bridgeFee), recvToken, recvChain, lifiData: data,
         steps: hops.map((h) => ({
           name: h.name,
           tool: h.name === "X1" ? "Warp Bridge" : "LiFi",
@@ -849,6 +978,41 @@ export default function Teleporter() {
 
   const executeStage2 = useCallback(async () => {
     setPhase("bridging"); setProgress(0);
+
+    // ── LIVE PATH (gated) — real Solana→X1 Warp bridge via warpBridge.js ──
+    if (WARP_LIVE && !DEMO_MODE) {
+      try {
+        const sol = typeof window !== "undefined" ? (window.solana || window.phantom?.solana) : null;
+        if (!sol?.publicKey) { flash("Connect Phantom to finish the X1 hop", "err"); setPhase("quoted"); return; }
+        const { Connection, PublicKey } = await import("@solana/web3.js");
+        const { runStage2 } = await import("./warpBridge.js");
+        const connection = new Connection(SOLANA_RPC, "confirmed");
+        const amountHuman = quote?.amount ?? pending?.amount;
+        const res = await runStage2({
+          connection,
+          userPubkey: sol.publicKey,
+          feeWalletSvm: new PublicKey(FEE_WALLET_SVM),
+          amountHuman,
+          allowLive: WARP_LIVE_SEND, // second gate: only truly sends if this is true too
+        });
+        if (!res.success) {
+          flash(`Bridge sim failed: ${JSON.stringify(res.sim?.err || "unknown")}`, "err");
+          setPhase("quoted");
+          return;
+        }
+        clearIntent();
+        if (pending?.histId) updateHistory(pending.histId, { status: "done" });
+        setProgress(1); setPhase("done");
+        flash(res.sent ? "Bridged to X1 ✓" : "Simulation passed ✓ (not sent)", "success");
+        return;
+      } catch (e) {
+        flash(`Warp error: ${String(e.message || e)}`, "err");
+        setPhase("quoted");
+        return;
+      }
+    }
+
+    // ── DEMO PATH (default, safe) — animated, no real bridge ──
     for (let p = 0; p <= 1.0001; p += 0.05) {
       setProgress(Math.min(1, p));
       // eslint-disable-next-line no-await-in-loop
@@ -858,7 +1022,7 @@ export default function Teleporter() {
     if (pending?.histId) updateHistory(pending.histId, { status: "done" });
     setPhase("done");
     flash("Bridge complete — funds on destination", "success");
-  }, [clearIntent, pending, updateHistory]);
+  }, [clearIntent, pending, updateHistory, quote]);
 
   // resume an interrupted hop from the recovery banner
   const resumePending = useCallback(() => {
@@ -889,12 +1053,12 @@ export default function Teleporter() {
   return (
     <div style={S.root}>
       <style>{`@keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.8); } }`}</style>
-      <NebulaBackground />
+      <PortalBackground />
       <div style={S.shell}>
         {/* header */}
         <header style={S.header}>
           <div style={S.brand}>
-            <span style={S.brandMark}>✕</span>
+            <span style={S.brandMark}>X1</span>
             <div>
               <div style={S.brandName}>TELEPORTER</div>
               <div style={S.brandSub}>stablecoin routing · any chain → X1</div>
@@ -920,7 +1084,7 @@ export default function Teleporter() {
 
         {/* route badge */}
         <div style={S.routeBadge}>
-          <span style={{ ...S.routeDot, background: CHAINS[to]?.color || "#00E0C6" }} />
+          <span style={{ ...S.routeDot, background: CHAINS[to]?.color || "#2775E8" }} />
           {ROUTE_LABEL[routeType]}
           {(routeType === "x1" || routeType === "x1_reverse") && (
             <span style={S.twoStage}>2 signatures</span>
@@ -931,7 +1095,7 @@ export default function Teleporter() {
         {pending && phase !== "step2" && phase !== "bridging" && (
           <div style={S.recoverBanner}>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#00E0C6" }}>Unfinished X1 hop</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#2775E8" }}>Unfinished X1 hop</div>
               <div style={{ fontSize: 12, color: "#9aa6bb", marginTop: 2 }}>
                 Your {pending.amount} {pending.token} reached Solana but didn't finish to {pending.recvChain}.
                 Your funds are safe — resume any time.
@@ -1006,6 +1170,11 @@ export default function Teleporter() {
               </div>
               <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal"
                 placeholder="0.00" style={S.amountInput} />
+              {(routeType === "x1" || routeType === "sol_x1") && (
+                <div style={{ fontSize: 11, color: "#5B9DFF", marginTop: 6, paddingLeft: 2 }}>
+                  Bridge ${X1_MIN}+ into X1 to get started
+                </div>
+              )}
             </div>
           </div>
 
@@ -1030,7 +1199,10 @@ export default function Teleporter() {
           {quote && (
             <div style={S.quoteBox}>
               <Row k="You send" v={`${quote.amount} ${token} on ${CHAINS[from].name}`} />
-              <Row k={quote.feeUsd > 0 ? "Fee (1%)" : "Fee"} v={`$${(quote.feeUsd || 0).toFixed(2)}`} dim />
+              <Row k={quote.feeUsd > 0 ? "Teleporter fee (1%)" : "Fee"} v={`$${(quote.feeUsd || 0).toFixed(2)}`} dim />
+              {quote.bridgeFee > 0 && (
+                <Row k="X1 bridge fee" v={`$${quote.bridgeFee.toFixed(2)}`} dim />
+              )}
               <Row k="You receive" v={`≈ ${quote.net.toFixed(2)} ${quote.recvToken} on ${quote.recvChain}`} hi />
               {quote.note && <div style={{ fontSize: 11, color: "#7d8aa0", marginTop: 4 }}>{quote.note}</div>}
               <div style={S.stepStrip}>
@@ -1051,7 +1223,7 @@ export default function Teleporter() {
                 {routeDetail.tools.map((t, i) => (
                   <React.Fragment key={i}>
                     <span style={S.toolChip}>
-                      <span style={{ color: t.type === "bridge" ? "#00E0C6" : "#9945FF" }}>●</span> {t.name}
+                      <span style={{ color: t.type === "bridge" ? "#2775E8" : "#9945FF" }}>●</span> {t.name}
                     </span>
                     {i < routeDetail.tools.length - 1 && <span style={{ color: "#475065" }}>→</span>}
                   </React.Fragment>
@@ -1069,7 +1241,7 @@ export default function Teleporter() {
             <div style={{ ...S.statusBox, borderColor: trackStatus.state === "DONE" ? "#1f6b3a" : trackStatus.state === "FAILED" ? "#6b1f1f" : "#1a2130" }}>
               <span style={{
                 ...S.statusDot,
-                background: trackStatus.state === "DONE" ? "#5ee08a" : trackStatus.state === "FAILED" ? "#E84142" : "#00E0C6",
+                background: trackStatus.state === "DONE" ? "#5ee08a" : trackStatus.state === "FAILED" ? "#E84142" : "#2775E8",
                 animation: trackStatus.state === "PENDING" ? "pulse 1.2s infinite" : "none",
               }} />
               <span style={{ fontSize: 13, fontWeight: 600 }}>{trackStatus.label}</span>
@@ -1087,7 +1259,7 @@ export default function Teleporter() {
             ) : phase === "bridging" ? (
               <button style={{ ...S.cta, opacity: 0.7 }} disabled>Bridging… {(progress * 100).toFixed(0)}%</button>
             ) : phase === "step2" ? (
-              <button style={{ ...S.cta, background: "linear-gradient(90deg,#9945FF,#00E0C6)" }} onClick={executeStage2}>
+              <button style={{ ...S.cta, background: "linear-gradient(90deg,#1B5FCC,#5B9DFF)" }} onClick={executeStage2}>
                 Step 2 of 2 — sign with Phantom →
               </button>
             ) : phase === "done" ? (
@@ -1126,8 +1298,8 @@ export default function Teleporter() {
                 </div>
                 <span style={{
                   ...S.histStatus,
-                  color: h.status === "done" ? "#5ee08a" : h.status === "failed" ? "#E84142" : "#00E0C6",
-                  borderColor: h.status === "done" ? "#1f6b3a" : h.status === "failed" ? "#6b1f1f" : "#16413c",
+                  color: h.status === "done" ? "#5ee08a" : h.status === "failed" ? "#E84142" : "#2775E8",
+                  borderColor: h.status === "done" ? "#1f6b3a" : h.status === "failed" ? "#6b1f1f" : "#1a3a6b",
                 }}>
                   {h.status === "done" ? "✓ done" : h.status === "failed" ? "✕ failed"
                     : h.status === "stage1_done" ? "● stage 2" : "● pending"}
@@ -1155,7 +1327,7 @@ function Row({ k, v, dim, hi }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
       <span style={{ color: "#7d8aa0", fontSize: 13 }}>{k}</span>
-      <span style={{ color: hi ? "#00E0C6" : dim ? "#9aa6bb" : "#e8edf6", fontSize: 13, fontWeight: hi ? 700 : 600 }}>{v}</span>
+      <span style={{ color: hi ? "#2775E8" : dim ? "#9aa6bb" : "#e8edf6", fontSize: 13, fontWeight: hi ? 700 : 600 }}>{v}</span>
     </div>
   );
 }
