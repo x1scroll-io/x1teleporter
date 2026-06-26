@@ -459,7 +459,7 @@ function ChainSelect({ label, value, onChange, exclude }) {
         <select value={value} onChange={(e) => onChange(e.target.value)} style={S.select}>
           {Object.values(CHAINS)
             .filter((c) => c.id !== exclude)
-            .map((c) => <option key={c.id} value={c.id}>{c.glyph}  {c.name}</option>)}
+            .map((c) => <option key={c.id} value={c.id}>{c.glyph === c.name ? c.name : `${c.glyph}  ${c.name}`}</option>)}
         </select>
       </div>
     </div>
