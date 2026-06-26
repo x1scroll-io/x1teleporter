@@ -21,6 +21,12 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from "react"
 //  CONFIG  (mirrors server.js — the canonical-ish token table)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── FLAGS (must be defined BEFORE CHAINS/TOKENS, which reference them) ──
+// DEMO_MODE: simulate quotes with no backend. Flip false when proxy is live.
+const DEMO_MODE = true;
+// ENABLE_TRON: website-only Tron support, bolt-on later. Flip true when ready.
+const ENABLE_TRON = false;
+
 const CHAINS = {
   x1:    { id: "x1",    name: "X1",          lifiKey: null,  chainId: null,  walletType: "solana", color: "#00E0C6", glyph: "✕" },
   eth:   { id: "eth",   name: "Ethereum",    lifiKey: "eth", chainId: 1,     walletType: "evm",    color: "#627EEA", glyph: "Ξ" },
@@ -59,14 +65,6 @@ const TOKENS = {
   } : {}),
 };
 
-// DEMO_MODE simulates quotes so the UI is clickable with no backend.
-// Flip to false once your /api/lifi proxy is running to get live quotes.
-const DEMO_MODE = true;
-
-// ── FEATURE FLAGS (staggered roadmap) ──
-// TRON: website-only, bolt-on next week. LiFi routes it; needs a TronLink
-// connector + TVM sign path (~half day). Flip ENABLE_TRON to true when ready.
-const ENABLE_TRON = false;
 
 // ── PERSISTENCE ──
 // Uses localStorage in a real deployment; falls back to an in-memory store in
