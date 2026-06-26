@@ -419,122 +419,6 @@ export default function Teleporter() {
     }
   }, [routeType, from, to]);
 
-  // Build the LiFi quote query for the LiFi leg of a route.
-  // For 'x1' on-ramp the LiFi leg is  from -> Solana USDC  (Warp does sol->x1).
-  // For 'x1_reverse' the LiFi leg is  Solana USDC -> to    (Warp does x1->sol).
-  // For 'direct' it's                 from -> to.
-  // 'sol_x1' has NO LiFi leg (pure Warp), so no fee is taken by LiFi there.
-  const buildLifiQuery = useCallback(() => {
-    const amt = parseFloat(amount);
-    const evmAddr = evmWallet?.addr || "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"; // vitalik.eth fallback for quotes
-    const solAddr = solWallet?.addr || "EAj1z4q6RN17BswMK38fADDEJQ5JTqy2WoTdky3drX6X";
-
-    let fromChain, toChain, fromTok, toTok, fromAddr, decimals;
-    if (routeType === "direct") {
-      fromChain = CHAINS[from].lifiKey; toChain = CHAINS[to].lifiKey;
-      fromTok = TOKENS[from][token].address; toTok = TOKENS[to][toToken].address;
-      fromAddr = CHAINS[from].walletType === "evm" ? evmAddr : solAddr;
-      decimals = TOKENS[from][token].decimals;
-    } else if (routeType === "x1") {
-      // from -> Solana USDC
-      fromChain = CHAINS[from].lifiKey; toChain = CHAINS.sol.lifiKey;
-      fromTok = TOKENS[from][token].address; toTok = TOKENS.sol.USDC.address;
-      fromAddr = CHAINS[from].walletType === "evm" ? evmAddr : solAddr;
-      decimals = TOKENS[from][token].decimals;
-    } else if (routeType === "x1_reverse") {
-      // Solana USDC -> to
-      fromChain = CHAINS.sol.lifiKey; toChain = CHAINS[to].lifiKey;
-      fromTok = TOKENS.sol.USDC.address; toTok = TOKENS[to][toToken].address;
-      fromAddr = solAddr;
-      decimals = 6; // Solana USDC
-    } else {
-      return null; // sol_x1: no LiFi leg
-    }
-
-    const rawAmount = BigInt(Math.floor(amt * 10 ** decimals)).toString();
-    const qs = new URLSearchParams({
-      fromChain, toChain, fromToken: fromTok, toToken: toTok,
-      fromAmount: rawAmount, fromAddress: fromAddr,
-      slippage: String(slippage / 100),
-      integrator: INTEGRATOR,
-      fee: String(INTEGRATOR_FEE), // <-- the 1% dev fee, collected by LiFi to your account
-    });
-    return { qs, decimals };
-  }, [amount, from, to, token, toToken, routeType, evmWallet, solWallet, slippage]);
-
-  // ── QUOTE ──
-  const getQuote = useCallback(async () => {
-    if (!amount || parseFloat(amount) <= 0) return flash("Enter an amount", "err");
-    if (from === to) return flash("Source and destination must differ", "err");
-    setPhase("quoting");
-
-    const amt = parseFloat(amount);
-
-    // sol_x1 has no LiFi leg — Warp only. (Fee model TBD on the Warp side.)
-    if (routeType === "sol_x1") {
-      await new Promise((r) => setTimeout(r, 400));
-      setQuote({
-        amount: amt, feeUsd: 0, net: amt, recvToken: "USDC.x", recvChain: "X1",
-        note: "Direct Warp bridge — no LiFi leg",
-        steps: hops.map((h) => ({ name: h.name, tool: "Warp Bridge" })),
-      });
-      setPhase("quoted");
-      return;
-    }
-
-    // DEMO MODE — simulate, no backend needed
-    if (DEMO_MODE) {
-      await new Promise((r) => setTimeout(r, 650));
-      const feeUsd = amt * INTEGRATOR_FEE;
-      const net = Math.max(0, amt - feeUsd);
-      const recvToken = routeType === "x1" ? "USDC.x" : toToken;
-      const recvChain = routeType === "x1" ? "X1" : CHAINS[to].name;
-      setQuote({
-        amount: amt, feeUsd, net, recvToken, recvChain, demo: true,
-        steps: hops.map((h, i) => ({
-          name: h.name,
-          tool: h.name === "X1" ? "Warp Bridge" : (routeType === "sol_x1" ? "Warp Bridge" : "LiFi"),
-        })),
-      });
-      setPhase("quoted");
-      return;
-    }
-
-    // LIVE MODE — real LiFi call through your proxy
-    try {
-      const built = buildLifiQuery();
-      if (!built) { flash("No route", "err"); setPhase("idle"); return; }
-      const resp = await fetch(`${API_BASE}/api/lifi/quote?${built.qs}`);
-      const data = await resp.json();
-      if (data.error || data.message) {
-        flash(data.message || data.error, "err"); setPhase("idle"); return;
-      }
-      // LiFi already deducted the integrator fee; estimate.toAmount is the honest output.
-      const outDecimals = routeType === "x1"
-        ? TOKENS.sol.USDC.decimals
-        : (routeType === "x1_reverse" ? TOKENS[to][toToken].decimals : TOKENS[to][toToken].decimals);
-      const out = parseFloat(data.estimate.toAmount) / 10 ** outDecimals;
-      // The fee LiFi took, surfaced for display (from feeCosts if present).
-      const feeUsd = amt * INTEGRATOR_FEE;
-      const recvToken = routeType === "x1" ? "USDC.x" : toToken;
-      const recvChain = routeType === "x1" ? "X1" : CHAINS[to].name;
-
-      setQuote({
-        amount: amt, feeUsd, net: out, recvToken, recvChain, lifiData: data,
-        steps: hops.map((h) => ({
-          name: h.name,
-          tool: h.name === "X1" ? "Warp Bridge" : "LiFi",
-        })),
-      });
-      setPhase("quoted");
-    } catch (e) {
-      flash("Quote request failed", "err"); setPhase("idle");
-    }
-  }, [amount, from, to, routeType, toToken, hops, buildLifiQuery]);
-
-  // ── HISTORY helpers ──
-  // In your real app, persist with window.storage.set('history', ...) so it
-  // survives reloads. Artifacts can't use localStorage, so this is in-memory.
   const addHistory = useCallback((entry) => {
     setHistory((h) => [{ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ts: Date.now(), ...entry }, ...h].slice(0, 50));
   }, []);
@@ -546,6 +430,13 @@ export default function Teleporter() {
   // Takes the LiFi quote's transactionRequest and sends it via the EVM wallet.
   // Returns the tx hash on success. Solana-origin LiFi steps would use the
   // Phantom provider instead (sketched but EVM is the primary path).
+  function getOriginWallet() {
+    const c = CHAINS[from];
+    if (c.walletType === "evm") return evmWallet ? { ...evmWallet, type: "evm" } : null;
+    if (c.walletType === "solana") return solWallet ? { ...solWallet, type: "solana" } : null;
+    return null;
+  }
+
   const executeLiFiTx = useCallback(async (lifiData) => {
     let txReq = lifiData?.transactionRequest || lifiData?.steps?.[0]?.transactionRequest;
     if (!txReq) throw new Error("No transaction data in quote");
@@ -566,105 +457,6 @@ export default function Teleporter() {
   }, [evmWallet, solWallet]);
 
   // helper to resolve the origin wallet (used by executeLiFiTx + quote)
-  function getOriginWallet() {
-    const c = CHAINS[from];
-    if (c.walletType === "evm") return evmWallet ? { ...evmWallet, type: "evm" } : null;
-    if (c.walletType === "solana") return solWallet ? { ...solWallet, type: "solana" } : null;
-    return null;
-  }
-
-  const execute = useCallback(async () => {
-    setRouteDetail(DEMO_MODE ? demoRouteDetail() : extractRouteDetail(quote?.lifiData));
-    const twoStage = routeType === "x1" || routeType === "x1_reverse" || routeType === "sol_x1";
-
-    // record a pending history entry up front
-    const histId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    setHistory((h) => [{
-      id: histId, ts: Date.now(), from, to, token,
-      recvToken: quote?.recvToken, recvChain: quote?.recvChain,
-      amount: quote?.amount, routeType, status: "pending", txHash: null,
-    }, ...h].slice(0, 50));
-
-    if (!DEMO_MODE) {
-      // LIVE: sign and send the real LiFi transaction
-      try {
-        setPhase("bridging"); setProgress(0.1);
-        const txHash = await executeLiFiTx(quote.lifiData);
-        updateHistory(histId, { txHash, status: twoStage ? "stage1_done" : "bridging" });
-        if (twoStage) {
-          rememberIntent({ routeType, from, to, token, toToken, amount: quote?.amount,
-            recvToken: quote?.recvToken, recvChain: quote?.recvChain, stage: "awaiting_stage2",
-            histId, ts: Date.now() });
-          setPhase("step2");
-          flash("Stage 1 sent. Approve Stage 2 to finish.", "info");
-        } else {
-          startStatusPoll(txHash, CHAINS[from].lifiKey, CHAINS[to].lifiKey, histId);
-          flash("Bridge submitted — tracking…", "info");
-        }
-      } catch (e) {
-        updateHistory(histId, { status: "failed" });
-        setPhase("quoted");
-        flash(e?.message?.includes("reject") || e?.code === 4001 ? "Transaction rejected" : (e.message || "Send failed"), "err");
-      }
-      return;
-    }
-
-    // DEMO: animated path
-    setPhase("bridging"); setProgress(0);
-    for (let p = 0; p <= 1.0001; p += 0.04) {
-      setProgress(Math.min(1, p));
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 60));
-    }
-    if (twoStage) {
-      rememberIntent({ routeType, from, to, token, toToken, amount: quote?.amount,
-        recvToken: quote?.recvToken, recvChain: quote?.recvChain, stage: "awaiting_stage2", histId, ts: Date.now() });
-      updateHistory(histId, { status: "stage1_done" });
-      setPhase("step2");
-      flash("Stage 1 landed. Approve Stage 2 to finish.", "info");
-      return;
-    }
-    startStatusPoll("0xdemoStage1Hash", CHAINS[from].lifiKey, CHAINS[to].lifiKey, histId);
-    flash("Bridge submitted — tracking…", "info");
-  }, [routeType, from, to, token, toToken, quote, demoRouteDetail, extractRouteDetail, rememberIntent, startStatusPoll, executeLiFiTx, updateHistory]);
-
-  const executeStage2 = useCallback(async () => {
-    setPhase("bridging"); setProgress(0);
-    for (let p = 0; p <= 1.0001; p += 0.05) {
-      setProgress(Math.min(1, p));
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 55));
-    }
-    clearIntent(); // hop completed — forget the pending intent
-    if (pending?.histId) updateHistory(pending.histId, { status: "done" });
-    setPhase("done");
-    flash("Bridge complete — funds on destination", "success");
-  }, [clearIntent, pending, updateHistory]);
-
-  // resume an interrupted hop from the recovery banner
-  const resumePending = useCallback(() => {
-    if (!pending) return;
-    // restore the form to the pending route and jump to stage 2
-    setFrom(pending.from); setTo(pending.to);
-    setToken(pending.token); setToToken(pending.toToken);
-    setAmount(String(pending.amount || ""));
-    setQuote({
-      amount: pending.amount, feeUsd: (pending.amount || 0) * INTEGRATOR_FEE,
-      net: (pending.amount || 0) * (1 - INTEGRATOR_FEE),
-      recvToken: pending.recvToken, recvChain: pending.recvChain,
-      steps: [], resumed: true,
-    });
-    setPhase("step2");
-    flash("Resuming your X1 hop — approve Stage 2", "info");
-  }, [pending]);
-
-  const reset = () => { setPhase("idle"); setQuote(null); setProgress(0); setTrackStatus(null); setRouteDetail(null); };
-
-  // ───────────────────────────────────────────────────────────────────────────
-  //  FEATURE 1 — TOKEN BALANCES  (read the connected wallet)
-  // ───────────────────────────────────────────────────────────────────────────
-  // EVM: eth_call balanceOf on the token contract. SVM: getTokenAccountsByOwner.
-  // In DEMO_MODE we synthesize believable balances so the UI is testable.
   const ERC20_BAL = "0x70a08231"; // balanceOf(address) selector
 
   const fetchBalance = useCallback(async (chainId, sym) => {
@@ -816,6 +608,209 @@ export default function Teleporter() {
     // In your real app: await window.storage?.delete('pendingBridge')
   }, []);
 
+  const buildLifiQuery = useCallback(() => {
+    const amt = parseFloat(amount);
+    const evmAddr = evmWallet?.addr || "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"; // vitalik.eth fallback for quotes
+    const solAddr = solWallet?.addr || "EAj1z4q6RN17BswMK38fADDEJQ5JTqy2WoTdky3drX6X";
+
+    let fromChain, toChain, fromTok, toTok, fromAddr, decimals;
+    if (routeType === "direct") {
+      fromChain = CHAINS[from].lifiKey; toChain = CHAINS[to].lifiKey;
+      fromTok = TOKENS[from][token].address; toTok = TOKENS[to][toToken].address;
+      fromAddr = CHAINS[from].walletType === "evm" ? evmAddr : solAddr;
+      decimals = TOKENS[from][token].decimals;
+    } else if (routeType === "x1") {
+      // from -> Solana USDC
+      fromChain = CHAINS[from].lifiKey; toChain = CHAINS.sol.lifiKey;
+      fromTok = TOKENS[from][token].address; toTok = TOKENS.sol.USDC.address;
+      fromAddr = CHAINS[from].walletType === "evm" ? evmAddr : solAddr;
+      decimals = TOKENS[from][token].decimals;
+    } else if (routeType === "x1_reverse") {
+      // Solana USDC -> to
+      fromChain = CHAINS.sol.lifiKey; toChain = CHAINS[to].lifiKey;
+      fromTok = TOKENS.sol.USDC.address; toTok = TOKENS[to][toToken].address;
+      fromAddr = solAddr;
+      decimals = 6; // Solana USDC
+    } else {
+      return null; // sol_x1: no LiFi leg
+    }
+
+    const rawAmount = BigInt(Math.floor(amt * 10 ** decimals)).toString();
+    const qs = new URLSearchParams({
+      fromChain, toChain, fromToken: fromTok, toToken: toTok,
+      fromAmount: rawAmount, fromAddress: fromAddr,
+      slippage: String(slippage / 100),
+      integrator: INTEGRATOR,
+      fee: String(INTEGRATOR_FEE), // <-- the 1% dev fee, collected by LiFi to your account
+    });
+    return { qs, decimals };
+  }, [amount, from, to, token, toToken, routeType, evmWallet, solWallet, slippage]);
+
+  // ── QUOTE ──
+  const getQuote = useCallback(async () => {
+    if (!amount || parseFloat(amount) <= 0) return flash("Enter an amount", "err");
+    if (from === to) return flash("Source and destination must differ", "err");
+    setPhase("quoting");
+
+    const amt = parseFloat(amount);
+
+    // sol_x1 has no LiFi leg — Warp only. (Fee model TBD on the Warp side.)
+    if (routeType === "sol_x1") {
+      await new Promise((r) => setTimeout(r, 400));
+      setQuote({
+        amount: amt, feeUsd: 0, net: amt, recvToken: "USDC.x", recvChain: "X1",
+        note: "Direct Warp bridge — no LiFi leg",
+        steps: hops.map((h) => ({ name: h.name, tool: "Warp Bridge" })),
+      });
+      setPhase("quoted");
+      return;
+    }
+
+    // DEMO MODE — simulate, no backend needed
+    if (DEMO_MODE) {
+      await new Promise((r) => setTimeout(r, 650));
+      const feeUsd = amt * INTEGRATOR_FEE;
+      const net = Math.max(0, amt - feeUsd);
+      const recvToken = routeType === "x1" ? "USDC.x" : toToken;
+      const recvChain = routeType === "x1" ? "X1" : CHAINS[to].name;
+      setQuote({
+        amount: amt, feeUsd, net, recvToken, recvChain, demo: true,
+        steps: hops.map((h, i) => ({
+          name: h.name,
+          tool: h.name === "X1" ? "Warp Bridge" : (routeType === "sol_x1" ? "Warp Bridge" : "LiFi"),
+        })),
+      });
+      setPhase("quoted");
+      return;
+    }
+
+    // LIVE MODE — real LiFi call through your proxy
+    try {
+      const built = buildLifiQuery();
+      if (!built) { flash("No route", "err"); setPhase("idle"); return; }
+      const resp = await fetch(`${API_BASE}/api/lifi/quote?${built.qs}`);
+      const data = await resp.json();
+      if (data.error || data.message) {
+        flash(data.message || data.error, "err"); setPhase("idle"); return;
+      }
+      // LiFi already deducted the integrator fee; estimate.toAmount is the honest output.
+      const outDecimals = routeType === "x1"
+        ? TOKENS.sol.USDC.decimals
+        : (routeType === "x1_reverse" ? TOKENS[to][toToken].decimals : TOKENS[to][toToken].decimals);
+      const out = parseFloat(data.estimate.toAmount) / 10 ** outDecimals;
+      // The fee LiFi took, surfaced for display (from feeCosts if present).
+      const feeUsd = amt * INTEGRATOR_FEE;
+      const recvToken = routeType === "x1" ? "USDC.x" : toToken;
+      const recvChain = routeType === "x1" ? "X1" : CHAINS[to].name;
+
+      setQuote({
+        amount: amt, feeUsd, net: out, recvToken, recvChain, lifiData: data,
+        steps: hops.map((h) => ({
+          name: h.name,
+          tool: h.name === "X1" ? "Warp Bridge" : "LiFi",
+        })),
+      });
+      setPhase("quoted");
+    } catch (e) {
+      flash("Quote request failed", "err"); setPhase("idle");
+    }
+  }, [amount, from, to, routeType, toToken, hops, buildLifiQuery]);
+
+  // ── HISTORY helpers ──
+  // In your real app, persist with window.storage.set('history', ...) so it
+  // survives reloads. Artifacts can't use localStorage, so this is in-memory.
+  const execute = useCallback(async () => {
+    setRouteDetail(DEMO_MODE ? demoRouteDetail() : extractRouteDetail(quote?.lifiData));
+    const twoStage = routeType === "x1" || routeType === "x1_reverse" || routeType === "sol_x1";
+
+    // record a pending history entry up front
+    const histId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setHistory((h) => [{
+      id: histId, ts: Date.now(), from, to, token,
+      recvToken: quote?.recvToken, recvChain: quote?.recvChain,
+      amount: quote?.amount, routeType, status: "pending", txHash: null,
+    }, ...h].slice(0, 50));
+
+    if (!DEMO_MODE) {
+      // LIVE: sign and send the real LiFi transaction
+      try {
+        setPhase("bridging"); setProgress(0.1);
+        const txHash = await executeLiFiTx(quote.lifiData);
+        updateHistory(histId, { txHash, status: twoStage ? "stage1_done" : "bridging" });
+        if (twoStage) {
+          rememberIntent({ routeType, from, to, token, toToken, amount: quote?.amount,
+            recvToken: quote?.recvToken, recvChain: quote?.recvChain, stage: "awaiting_stage2",
+            histId, ts: Date.now() });
+          setPhase("step2");
+          flash("Stage 1 sent. Approve Stage 2 to finish.", "info");
+        } else {
+          startStatusPoll(txHash, CHAINS[from].lifiKey, CHAINS[to].lifiKey, histId);
+          flash("Bridge submitted — tracking…", "info");
+        }
+      } catch (e) {
+        updateHistory(histId, { status: "failed" });
+        setPhase("quoted");
+        flash(e?.message?.includes("reject") || e?.code === 4001 ? "Transaction rejected" : (e.message || "Send failed"), "err");
+      }
+      return;
+    }
+
+    // DEMO: animated path
+    setPhase("bridging"); setProgress(0);
+    for (let p = 0; p <= 1.0001; p += 0.04) {
+      setProgress(Math.min(1, p));
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    if (twoStage) {
+      rememberIntent({ routeType, from, to, token, toToken, amount: quote?.amount,
+        recvToken: quote?.recvToken, recvChain: quote?.recvChain, stage: "awaiting_stage2", histId, ts: Date.now() });
+      updateHistory(histId, { status: "stage1_done" });
+      setPhase("step2");
+      flash("Stage 1 landed. Approve Stage 2 to finish.", "info");
+      return;
+    }
+    startStatusPoll("0xdemoStage1Hash", CHAINS[from].lifiKey, CHAINS[to].lifiKey, histId);
+    flash("Bridge submitted — tracking…", "info");
+  }, [routeType, from, to, token, toToken, quote, demoRouteDetail, extractRouteDetail, rememberIntent, startStatusPoll, executeLiFiTx, updateHistory]);
+
+  const executeStage2 = useCallback(async () => {
+    setPhase("bridging"); setProgress(0);
+    for (let p = 0; p <= 1.0001; p += 0.05) {
+      setProgress(Math.min(1, p));
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 55));
+    }
+    clearIntent(); // hop completed — forget the pending intent
+    if (pending?.histId) updateHistory(pending.histId, { status: "done" });
+    setPhase("done");
+    flash("Bridge complete — funds on destination", "success");
+  }, [clearIntent, pending, updateHistory]);
+
+  // resume an interrupted hop from the recovery banner
+  const resumePending = useCallback(() => {
+    if (!pending) return;
+    // restore the form to the pending route and jump to stage 2
+    setFrom(pending.from); setTo(pending.to);
+    setToken(pending.token); setToToken(pending.toToken);
+    setAmount(String(pending.amount || ""));
+    setQuote({
+      amount: pending.amount, feeUsd: (pending.amount || 0) * INTEGRATOR_FEE,
+      net: (pending.amount || 0) * (1 - INTEGRATOR_FEE),
+      recvToken: pending.recvToken, recvChain: pending.recvChain,
+      steps: [], resumed: true,
+    });
+    setPhase("step2");
+    flash("Resuming your X1 hop — approve Stage 2", "info");
+  }, [pending]);
+
+  const reset = () => { setPhase("idle"); setQuote(null); setProgress(0); setTrackStatus(null); setRouteDetail(null); };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  //  FEATURE 1 — TOKEN BALANCES  (read the connected wallet)
+  // ───────────────────────────────────────────────────────────────────────────
+  // EVM: eth_call balanceOf on the token contract. SVM: getTokenAccountsByOwner.
+  // In DEMO_MODE we synthesize believable balances so the UI is testable.
   const active = phase === "bridging" || phase === "step2";
 
   return (
